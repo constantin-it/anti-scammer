@@ -1,3 +1,4 @@
+from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
@@ -18,8 +19,10 @@ def get_cancel_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]
     ])
 
-def get_actions_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Проверить ещё сообщение", callback_data="start_check")],
-        [InlineKeyboardButton(text="⚠️ Что делать, если уже перевёл?", callback_data="what_if_scammed")]
-    ])
+def get_actions_keyboard(case_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    buttons = []
+    if case_id is not None and case_id > 0:
+        buttons.append([InlineKeyboardButton(text="🛡 Бот уберёг! Я не попался", callback_data=f"prevented:{case_id}")])
+    buttons.append([InlineKeyboardButton(text="🔍 Проверить ещё сообщение / скриншот", callback_data="start_check")])
+    buttons.append([InlineKeyboardButton(text="⚠️ Что делать, если уже перевёл?", callback_data="what_if_scammed")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

@@ -7,7 +7,14 @@ from aiogram.fsm.state import State, StatesGroup
 
 from ai_service import ai_service, ScamAnalysisResult
 from keyboards import get_main_keyboard, get_cancel_keyboard, get_actions_keyboard
-from database import register_or_update_user, save_message, save_screenshot
+from database import (
+    register_or_update_user,
+    save_message,
+    save_screenshot,
+    record_scam_case,
+    confirm_scam_prevented,
+    get_scam_stats
+)
 
 router = Router()
 
@@ -97,9 +104,25 @@ async def cmd_start(message: Message, state: FSMContext):
             f"<i>Рады снова тебя видеть! (Визит №{visits_count} | {avatar_status})</i>\n\n"
         )
 
+    # Получаем статистику раскрытых схем и спасённых пользователей
+    stats = await get_scam_stats(user_id=user.id)
+    total_exposed = stats.get("total_exposed", 0)
+    total_rescued = stats.get("total_rescued", 0)
+    user_exposed = stats.get("user_exposed", 0)
+
+    # Красивый блок со счетчиком раскрытых мошенников
+    stats_badge = (
+        f"🛡 <b>Раскрыто мошенников и опасных схем:</b> <code>{total_exposed}</code>\n"
+        f"🙌 <b>Помог людям не попасться на обман:</b> <code>{total_rescued}</code> раз(а)\n"
+    )
+    if user_exposed > 0:
+        stats_badge += f"🎯 <i>Вам лично бот уже помог распознать {user_exposed} подозрительных ситуаций!</i>\n"
+
     welcome_text = (
         greeting_header +
         f"Я — <b>АнтиМошенник (AntiScammer)</b>, твой персональный AI-ассистент по цифровой безопасности.\n\n"
+        f"📊 <b>Наша статистика безопасности:</b>\n"
+        f"{stats_badge}\n"
         f"💡 <b>Что я умею:</b>\n"
         f"1. <b>Анализировать подозрительные сообщения и скриншоты переписок</b> с помощью искусственного интеллекта Gemini на манипуляции, фишинг, фейковые чеки и шантаж.\n"
         f"2. <b>Защищать от «дропперства» и серых переводов:</b> когда просят перевести деньги на сторонние номера/карты (например, при покупке игровой валюты, робуксов, скинов), что часто ведет к статьям об экстремизме или отмывании денег.\n"
@@ -244,8 +267,23 @@ async def process_user_photo(message: Message, state: FSMContext):
             mime_type=mime_type,
             user_comment=message.caption
         )
+        case_id = 0
+        is_scam_or_risky = report.is_scam or any(lvl in report.risk_level.lower() for lvl in ["средний", "высокий", "критический"])
+        if is_scam_or_risky:
+            case_id = await record_scam_case(
+                user_id=message.from_user.id,
+                scam_type=report.scam_type,
+                risk_level=report.risk_level,
+                summary=report.summary,
+                source="image"
+            )
+
         formatted_text = format_report(report)
-        await waiting_msg.edit_text(formatted_text, reply_markup=get_actions_keyboard(), parse_mode="HTML")
+        await waiting_msg.edit_text(
+            formatted_text,
+            reply_markup=get_actions_keyboard(case_id=case_id if case_id > 0 else None),
+            parse_mode="HTML"
+        )
         await save_message(user_id=message.from_user.id, sender="bot", text=formatted_text)
     except Exception as e:
         logger.exception("Ошибка при обработке изображения")
@@ -265,8 +303,23 @@ async def process_user_text(message: Message, state: FSMContext):
     
     try:
         report = await ai_service.analyze_text(message.text)
+        case_id = 0
+        is_scam_or_risky = report.is_scam or any(lvl in report.risk_level.lower() for lvl in ["средний", "высокий", "критический"])
+        if is_scam_or_risky:
+            case_id = await record_scam_case(
+                user_id=message.from_user.id,
+                scam_type=report.scam_type,
+                risk_level=report.risk_level,
+                summary=report.summary,
+                source="text"
+            )
+
         formatted_text = format_report(report)
-        await waiting_msg.edit_text(formatted_text, reply_markup=get_actions_keyboard(), parse_mode="HTML")
+        await waiting_msg.edit_text(
+            formatted_text,
+            reply_markup=get_actions_keyboard(case_id=case_id if case_id > 0 else None),
+            parse_mode="HTML"
+        )
         await save_message(user_id=message.from_user.id, sender="bot", text=formatted_text)
     except Exception as e:
         error_msg = f"❌ Не удалось завершить анализ: {html.escape(str(e))}\n\nПопробуйте ещё раз позже."
@@ -276,4 +329,22 @@ async def process_user_text(message: Message, state: FSMContext):
             parse_mode="HTML"
         )
         await save_message(user_id=message.from_user.id, sender="bot", text=error_msg)
+
+
+@router.callback_query(F.data.startswith("prevented:"))
+async def cb_prevented(call: CallbackQuery):
+    case_id_str = call.data.split(":", 1)[1]
+    case_id = int(case_id_str) if case_id_str.isdigit() else 0
+    await confirm_scam_prevented(case_id=case_id, user_id=call.from_user.id)
+
+    stats = await get_scam_stats()
+    text = (
+        "🎉 <b>Отличная работа! Вы спасли свои деньги и безопасность!</b>\n\n"
+        "Главное оружие против мошенников — бдительность и пауза перед переводом.\n\n"
+        f"📊 Всего бот помог раскрыть уже <b>{stats['total_exposed']}</b> опасных схем и уберёг людей от потери средств.\n\n"
+        "<i>Расскажите о боте друзьям и близким, чтобы они тоже не попались в мошенническую ловушку!</i> 🛡"
+    )
+    await call.answer("🛡 Рады, что уберегли вас от мошенников! Статистика обновлена.", show_alert=True)
+    await call.message.answer(text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await save_message(user_id=call.from_user.id, sender="bot", text=text)
 

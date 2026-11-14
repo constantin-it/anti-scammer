@@ -43,6 +43,32 @@ async def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scam_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                scam_type TEXT,
+                risk_level TEXT,
+                summary TEXT,
+                source TEXT,
+                is_prevented INTEGER DEFAULT 1,
+                user_confirmed INTEGER DEFAULT 0,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+        # Миграция предыдущих раскрытых мошенничеств, если таблица пуста
+        async with db.execute("SELECT COUNT(*) FROM scam_cases") as cur:
+            cnt = (await cur.fetchone())[0]
+            if cnt == 0:
+                await db.execute("""
+                    INSERT INTO scam_cases (user_id, scam_type, risk_level, summary, source, is_prevented, user_confirmed, timestamp)
+                    SELECT user_id, 'Раскрытая схема', 'Высокий/Критический', SUBSTR(text, 1, 200), 'history', 1, 0, timestamp
+                    FROM messages
+                    WHERE text LIKE '%ЭКСПЕРТИЗА БЕЗОПАСНОСТИ%'
+                      AND text NOT LIKE '%демо-режим%'
+                      AND text NOT LIKE '%ошибка обработки%'
+                """)
         await db.execute("DROP VIEW IF EXISTS top_active_users")
         await db.execute("""
             CREATE VIEW top_active_users AS
@@ -87,6 +113,78 @@ async def save_screenshot(user_id: int, file_id: str, url: Optional[str]):
             await db.commit()
     except Exception as e:
         logger.error(f"Ошибка сохранения скриншота в БД: {e}")
+
+async def record_scam_case(
+    user_id: int,
+    scam_type: str,
+    risk_level: str,
+    summary: str,
+    source: str = "text"
+) -> int:
+    """
+    Записывает раскрытый случай мошенничества в базу данных.
+    Возвращает id записи (case_id).
+    """
+    now = datetime.utcnow().isoformat()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                INSERT INTO scam_cases (user_id, scam_type, risk_level, summary, source, is_prevented, user_confirmed, timestamp)
+                VALUES (?, ?, ?, ?, ?, 1, 0, ?)
+            """, (user_id, scam_type, risk_level, summary, source, now))
+            await db.commit()
+            return cursor.lastrowid
+    except Exception as e:
+        logger.error(f"Ошибка сохранения случая мошенничества в БД: {e}")
+        return 0
+
+async def confirm_scam_prevented(case_id: int, user_id: int) -> bool:
+    """Отмечает, что пользователь подтвердил помощь бота (не попался на уловку)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if case_id > 0:
+                await db.execute("""
+                    UPDATE scam_cases
+                    SET user_confirmed = 1
+                    WHERE id = ? AND user_id = ?
+                """, (case_id, user_id))
+            else:
+                await db.execute("""
+                    UPDATE scam_cases
+                    SET user_confirmed = 1
+                    WHERE id = (SELECT id FROM scam_cases WHERE user_id = ? ORDER BY id DESC LIMIT 1)
+                """, (user_id,))
+            await db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Ошибка подтверждения предотвращения обмана: {e}")
+        return False
+
+async def get_scam_stats(user_id: Optional[int] = None) -> Dict[str, int]:
+    """
+    Возвращает статистику раскрытых мошенников и спасенных пользователей:
+    - total_exposed: всего раскрыто мошеннических схем
+    - total_rescued: сколько раз бот помог уберечь людей
+    - user_exposed: сколько схем раскрыто для конкретного пользователя
+    """
+    stats = {"total_exposed": 0, "total_rescued": 0, "user_exposed": 0}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM scam_cases") as cursor:
+                row = await cursor.fetchone()
+                stats["total_exposed"] = row[0] if row else 0
+
+            async with db.execute("SELECT COUNT(*) FROM scam_cases WHERE is_prevented = 1") as cursor:
+                row = await cursor.fetchone()
+                stats["total_rescued"] = row[0] if row else 0
+
+            if user_id:
+                async with db.execute("SELECT COUNT(*) FROM scam_cases WHERE user_id = ?", (user_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    stats["user_exposed"] = row[0] if row else 0
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики мошенников: {e}")
+    return stats
 
 async def get_chat_history(user_id: int, limit: int = 50) -> list:
     """Получает последние сообщения пользователя и бота."""
