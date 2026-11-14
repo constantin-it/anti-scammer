@@ -17,7 +17,22 @@ class ChatLoggingMiddleware(BaseMiddleware):
         if isinstance(event, Message):
             if event.from_user and not event.from_user.is_bot:
                 # Если это текст сообщения или медиа
-                text_to_save = event.text or (f"[Изображение]: {event.caption}" if event.caption else ("[Изображение]" if (event.photo or event.document) else None))
+                if event.text:
+                    text_to_save = event.text
+                elif event.voice:
+                    text_to_save = f"[Голосовое сообщение] {event.caption or ''}".strip()
+                elif event.video_note:
+                    text_to_save = "[Видеокружочек]"
+                elif event.video:
+                    text_to_save = f"[Видео] {event.caption or ''}".strip()
+                elif event.photo:
+                    text_to_save = f"[Изображение] {event.caption or ''}".strip()
+                elif event.audio:
+                    text_to_save = f"[Аудиофайл] {event.caption or ''}".strip()
+                elif event.document:
+                    text_to_save = f"[Файл/Документ] {event.caption or ''}".strip()
+                else:
+                    text_to_save = event.caption
                 if text_to_save:
                     await save_message(user_id=event.from_user.id, sender="user", text=text_to_save)
         elif isinstance(event, CallbackQuery):

@@ -12,6 +12,8 @@ class ScamAnalysisResult(BaseModel):
     risk_level: str = Field(description="Уровень риска: Низкий (Безопасно), Средний (Подозрительно), Высокий (Опасно), Критический (Мошенничество/Угроза УК)")
     scam_type: str = Field(description="Категория/тип схемы: 'Дропперство / Финансирование экстремизма', 'Покупка игровой валюты / Фишинг', 'Звонок службы безопасности/ФСБ', 'Фейковая работа/инвестиции', 'Бытовой перевод', 'Другое'")
     summary: str = Field(description="Краткий вердикт в 1-2 предложениях простым языком")
+    transcription: Optional[str] = Field(default=None, description="Текстовая расшифровка голосового сообщения или аудиодорожки видео (что было сказано)")
+    visual_details: Optional[str] = Field(default=None, description="Краткое описание того, что видно на видео или изображении")
     red_flags: list[str] = Field(description="Список тревожных звоночков и признаков манипуляции")
     legal_warning: Optional[str] = Field(default=None, description="Предупреждение об уголовной/юридической ответственности, если схема связана с дропперством, переводами по чужим реквизитам или финансированием запрещенной деятельности")
     recommendations: list[str] = Field(description="Четкие инструкции для пользователя: что делать прямо сейчас")
@@ -139,6 +141,106 @@ class AIService:
                 red_flags=["Не удалось связаться с сервером ИИ для проверки"],
                 legal_warning=None,
                 recommendations=["Не переводите деньги и не переходите по ссылкам до подтверждения безопасности."]
+            )
+
+    async def analyze_voice(self, audio_bytes: bytes, mime_type: str = "audio/ogg", user_comment: Optional[str] = None) -> ScamAnalysisResult:
+        if not self.is_configured():
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Критический (демо-режим)",
+                scam_type="Анализ недоступен (не настроен GEMINI_API_KEY)",
+                summary="Бот работает в демонстрационном режиме, так как не указан GEMINI_API_KEY в .env.",
+                red_flags=["В конфигурации отсутствует действующий ключ Google Gemini API"],
+                legal_warning=None,
+                recommendations=["Получите бесплатный API ключ на https://aistudio.google.com/", "Укажите ключ в .env файле проекта и перезапустите бота"]
+            )
+        try:
+            prompt = (
+                "Прослушай данную аудиозапись / голосовое сообщение.\n"
+                "1. В поле 'transcription' обязательно сделай максимально точную текстовую расшифровку всего сказанного.\n"
+                "2. Проанализируй сообщение на признаки мошенничества, социальной инженерии (давление, паника, спешка, "
+                "легенды о 'звонке из службы безопасности банка/ФСБ/МВД/Следственного комитета', 'родственник попал в ДТП/беду', "
+                "требования продиктовать SMS-код, код из push-уведомления, перевести деньги на 'безопасный счёт', "
+                "предложения инвестиций, лёгкого заработка, дропперства или покупки крипты/игровой валюты).\n"
+                "3. Вынеси вердикт в структурированном виде."
+            )
+            if user_comment and user_comment.strip():
+                prompt += f"\n\nДополнительный комментарий пользователя к аудио:\n\"\"\"{user_comment.strip()}\"\"\""
+
+            response = self.client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=ScamAnalysisResult,
+                    temperature=0.2,
+                )
+            )
+            result = ScamAnalysisResult.model_validate_json(response.text)
+            return result
+        except Exception as e:
+            logger.exception("Ошибка при вызове Gemini API (voice)")
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Высокий (ошибка обработки)",
+                scam_type="Не удалось завершить автоматический анализ голосового сообщения",
+                summary=f"Произошла ошибка при анализе ИИ: {str(e)[:150]}",
+                red_flags=["Не удалось обработать аудиодорожку через сервер ИИ"],
+                legal_warning=None,
+                recommendations=["Не выполняйте никаких инструкций из голосового сообщения до полной проверки собеседника."]
+            )
+
+    async def analyze_video(self, video_bytes: bytes, mime_type: str = "video/mp4", user_comment: Optional[str] = None) -> ScamAnalysisResult:
+        if not self.is_configured():
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Критический (демо-режим)",
+                scam_type="Анализ недоступен (не настроен GEMINI_API_KEY)",
+                summary="Бот работает в демонстрационном режиме, так как не указан GEMINI_API_KEY в .env.",
+                red_flags=["В конфигурации отсутствует действующий ключ Google Gemini API"],
+                legal_warning=None,
+                recommendations=["Получите бесплатный API ключ на https://aistudio.google.com/", "Укажите ключ в .env файле проекта и перезапустите бота"]
+            )
+        try:
+            prompt = (
+                "Проанализируй данное видео (как видеоряд, так и аудиодорожку).\n"
+                "1. Если в видео звучит речь, расшифруй её в поле 'transcription'.\n"
+                "2. В поле 'visual_details' кратко опиши происходящее на экране (демонстрация графиков доходности, фальшивых приложений, балансов кошельков, документов, экран переписки, признаки дипфейка лица/голоса).\n"
+                "3. Проанализируй материал на признаки мошенничества, финансовых пирамид, фейковых розыгрышей, вымогательства, сомнительных приложений или дропперства.\n"
+                "4. Вынеси вердикт в структурированном виде."
+            )
+            if user_comment and user_comment.strip():
+                prompt += f"\n\nДополнительный комментарий пользователя к видео:\n\"\"\"{user_comment.strip()}\"\"\""
+
+            response = self.client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=video_bytes, mime_type=mime_type),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=ScamAnalysisResult,
+                    temperature=0.2,
+                )
+            )
+            result = ScamAnalysisResult.model_validate_json(response.text)
+            return result
+        except Exception as e:
+            logger.exception("Ошибка при вызове Gemini API (video)")
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Высокий (ошибка обработки)",
+                scam_type="Не удалось завершить автоматический анализ видео",
+                summary=f"Произошла ошибка при анализе ИИ: {str(e)[:150]}",
+                red_flags=["Не удалось обработать видеофайл через сервер ИИ"],
+                legal_warning=None,
+                recommendations=["Не следуйте инструкциям из подозрительных видео и не устанавливайте сторонние файлы."]
             )
 
 ai_service = AIService()

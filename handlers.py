@@ -11,6 +11,7 @@ from database import (
     register_or_update_user,
     save_message,
     save_screenshot,
+    save_media,
     record_scam_case,
     confirm_scam_prevented,
     get_scam_stats
@@ -45,8 +46,15 @@ def format_report(result: ScamAnalysisResult) -> str:
         f"<b>{icon} ЭКСПЕРТИЗА БЕЗОПАСНОСТИ</b>\n\n"
         f"<b>Уровень опасности:</b> <code>{html.escape(result.risk_level)}</code>\n"
         f"<b>Тип схемы:</b> <i>{html.escape(result.scam_type)}</i>\n\n"
-        f"<b>Резюме:</b>\n{html.escape(result.summary)}\n\n"
     )
+
+    if result.transcription:
+        text += f"🎙 <b>Расшифровка речи:</b>\n<i>«{html.escape(result.transcription)}»</i>\n\n"
+
+    if result.visual_details:
+        text += f"📹 <b>Визуальный анализ:</b>\n<i>{html.escape(result.visual_details)}</i>\n\n"
+
+    text += f"<b>Резюме:</b>\n{html.escape(result.summary)}\n\n"
 
     if result.red_flags:
         text += f"<b>🚩 Тревожные признаки:</b>\n{flags_text}\n\n"
@@ -123,11 +131,13 @@ async def cmd_start(message: Message, state: FSMContext):
         f"Я — <b>АнтиМошенник (AntiScammer)</b>, твой персональный AI-ассистент по цифровой безопасности.\n\n"
         f"📊 <b>Наша статистика безопасности:</b>\n"
         f"{stats_badge}\n"
-        f"💡 <b>Что я умею:</b>\n"
-        f"1. <b>Анализировать подозрительные сообщения и скриншоты переписок</b> с помощью искусственного интеллекта Gemini на манипуляции, фишинг, фейковые чеки и шантаж.\n"
-        f"2. <b>Защищать от «дропперства» и серых переводов:</b> когда просят перевести деньги на сторонние номера/карты (например, при покупке игровой валюты, робуксов, скинов), что часто ведет к статьям об экстремизме или отмывании денег.\n"
-        f"3. Давать четкие инструкции, как не потерять деньги и не стать соучастником преступления.\n\n"
-        f"👇 <i>Отправь мне текст или скриншот прямо сейчас либо выбери кнопку в меню!</i>"
+        f"💡 <b>Что я умею анализировать:</b>\n"
+        f"1. <b>Тексты и переписки</b> — выявление манипуляций, фишинга, угроз и шантажа.\n"
+        f"2. <b>Скриншоты и изображения</b> — OCR-чтение диалогов, поддельных чеков, реквизитов и QR-кодов.\n"
+        f"3. <b>Голосовые сообщения и аудио</b> — расшифровка речи и распознавание телефонного мошенничества, дипфейков и давления.\n"
+        f"4. <b>Видео и кружочки</b> — анализ видеоряда и речи на признаки финансовых пирамид, фейковых розыгрышей и обмана.\n"
+        f"5. <b>Защита от «дропперства»</b> — предупреждение об уголовной ответственности за переводы неизвестным лицам.\n\n"
+        f"👇 <i>Отправь мне текст, скриншот, голосовое сообщение или видео прямо сейчас!</i>"
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
     await save_message(user_id=user.id, sender="bot", text=welcome_text)
@@ -137,12 +147,13 @@ async def cmd_start(message: Message, state: FSMContext):
 async def start_check_prompt(message: Message, state: FSMContext):
     await state.set_state(CheckState.waiting_for_text)
     prompt_text = (
-        "📝 <b>Отправьте подозрительное сообщение, скриншот или опишите ситуацию:</b>\n\n"
+        "📝 <b>Отправьте сообщение, скриншот, голосовое или видео:</b>\n\n"
         "<i>Например:\n"
+        "— Голосовое сообщение от незнакомца или подозрительного абонента\n"
+        "— Видеосообщение (кружочек) или запись экрана с предложением заработка\n"
         "— Скриншот диалога с подозрительным собеседником или чек перевода\n"
         "— Текст переписки от продавца игровой валюты\n"
-        "— Просьбу перевести деньги по номеру телефона третьему лицу\n"
-        "— Ссылку на акцию или предложение лёгкого заработка</i>"
+        "— Просьбу перевести деньги по номеру телефона третьему лицу</i>"
     )
     await message.answer(prompt_text, reply_markup=get_cancel_keyboard(), parse_mode="HTML")
     await save_message(user_id=message.from_user.id, sender="bot", text=prompt_text)
@@ -288,6 +299,156 @@ async def process_user_photo(message: Message, state: FSMContext):
     except Exception as e:
         logger.exception("Ошибка при обработке изображения")
         error_msg = f"❌ Не удалось завершить анализ: {html.escape(str(e))}\n\nПопробуйте ещё раз позже."
+        await waiting_msg.edit_text(error_msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await save_message(user_id=message.from_user.id, sender="bot", text=error_msg)
+
+
+@router.message(F.voice | F.audio | (F.document & F.document.mime_type.startswith("audio/")))
+async def process_user_voice(message: Message, state: FSMContext):
+    await state.clear()
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="record_voice")
+    waiting_msg = await message.answer(
+        "🎙 <i>Слушаю, расшифровываю и анализирую аудиозапись через нейросеть Gemini... Пожалуйста, подождите.</i>",
+        parse_mode="HTML"
+    )
+
+    try:
+        if message.voice:
+            file_id = message.voice.file_id
+            mime_type = "audio/ogg"
+            file_size = message.voice.file_size
+        elif message.audio:
+            file_id = message.audio.file_id
+            mime_type = message.audio.mime_type or "audio/mpeg"
+            file_size = message.audio.file_size
+        else:
+            file_id = message.document.file_id
+            mime_type = message.document.mime_type or "audio/ogg"
+            file_size = message.document.file_size
+
+        if file_size and file_size > 20 * 1024 * 1024:
+            await waiting_msg.edit_text(
+                "⚠️ <b>Аудиофайл слишком большой (более 20 МБ).</b>\nПожалуйста, отправьте более короткий фрагмент записи.",
+                reply_markup=get_main_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+
+        file = await message.bot.get_file(file_id)
+        file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
+        await save_media(user_id=message.from_user.id, file_id=file_id, media_type="voice", url=file_url)
+
+        buf = await message.bot.download(file)
+        if hasattr(buf, "getvalue"):
+            audio_bytes = buf.getvalue()
+        elif hasattr(buf, "read"):
+            if hasattr(buf, "seek"):
+                buf.seek(0)
+            audio_bytes = buf.read()
+        else:
+            audio_bytes = buf
+
+        report = await ai_service.analyze_voice(
+            audio_bytes=audio_bytes,
+            mime_type=mime_type,
+            user_comment=message.caption
+        )
+        case_id = 0
+        is_scam_or_risky = report.is_scam or any(lvl in report.risk_level.lower() for lvl in ["средний", "высокий", "критический"])
+        if is_scam_or_risky:
+            case_id = await record_scam_case(
+                user_id=message.from_user.id,
+                scam_type=report.scam_type,
+                risk_level=report.risk_level,
+                summary=report.summary,
+                source="voice"
+            )
+
+        formatted_text = format_report(report)
+        await waiting_msg.edit_text(
+            formatted_text,
+            reply_markup=get_actions_keyboard(case_id=case_id if case_id > 0 else None),
+            parse_mode="HTML"
+        )
+        await save_message(user_id=message.from_user.id, sender="bot", text=formatted_text)
+    except Exception as e:
+        logger.exception("Ошибка при обработке аудио/голосового сообщения")
+        error_msg = f"❌ Не удалось завершить анализ голосового сообщения: {html.escape(str(e))}\n\nПопробуйте ещё раз позже."
+        await waiting_msg.edit_text(error_msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await save_message(user_id=message.from_user.id, sender="bot", text=error_msg)
+
+
+@router.message(F.video | F.video_note | (F.document & F.document.mime_type.startswith("video/")))
+async def process_user_video(message: Message, state: FSMContext):
+    await state.clear()
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_video")
+    waiting_msg = await message.answer(
+        "📹 <i>Анализирую видеоряд и аудиодорожку через нейросеть Gemini... Это может занять несколько секунд.</i>",
+        parse_mode="HTML"
+    )
+
+    try:
+        if message.video:
+            file_id = message.video.file_id
+            mime_type = message.video.mime_type or "video/mp4"
+            file_size = message.video.file_size
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            mime_type = "video/mp4"
+            file_size = message.video_note.file_size
+        else:
+            file_id = message.document.file_id
+            mime_type = message.document.mime_type or "video/mp4"
+            file_size = message.document.file_size
+
+        if file_size and file_size > 20 * 1024 * 1024:
+            await waiting_msg.edit_text(
+                "⚠️ <b>Видео слишком большое (более 20 МБ).</b>\nПожалуйста, отправьте более короткий фрагмент видео.",
+                reply_markup=get_main_keyboard(),
+                parse_mode="HTML"
+            )
+            return
+
+        file = await message.bot.get_file(file_id)
+        file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
+        await save_media(user_id=message.from_user.id, file_id=file_id, media_type="video", url=file_url)
+
+        buf = await message.bot.download(file)
+        if hasattr(buf, "getvalue"):
+            video_bytes = buf.getvalue()
+        elif hasattr(buf, "read"):
+            if hasattr(buf, "seek"):
+                buf.seek(0)
+            video_bytes = buf.read()
+        else:
+            video_bytes = buf
+
+        report = await ai_service.analyze_video(
+            video_bytes=video_bytes,
+            mime_type=mime_type,
+            user_comment=message.caption
+        )
+        case_id = 0
+        is_scam_or_risky = report.is_scam or any(lvl in report.risk_level.lower() for lvl in ["средний", "высокий", "критический"])
+        if is_scam_or_risky:
+            case_id = await record_scam_case(
+                user_id=message.from_user.id,
+                scam_type=report.scam_type,
+                risk_level=report.risk_level,
+                summary=report.summary,
+                source="video"
+            )
+
+        formatted_text = format_report(report)
+        await waiting_msg.edit_text(
+            formatted_text,
+            reply_markup=get_actions_keyboard(case_id=case_id if case_id > 0 else None),
+            parse_mode="HTML"
+        )
+        await save_message(user_id=message.from_user.id, sender="bot", text=formatted_text)
+    except Exception as e:
+        logger.exception("Ошибка при обработке видео")
+        error_msg = f"❌ Не удалось завершить анализ видео: {html.escape(str(e))}\n\nПопробуйте ещё раз позже."
         await waiting_msg.edit_text(error_msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
         await save_message(user_id=message.from_user.id, sender="bot", text=error_msg)
 

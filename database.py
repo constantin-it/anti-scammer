@@ -44,6 +44,17 @@ async def init_db():
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS media_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                file_id TEXT,
+                media_type TEXT,
+                url TEXT,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS scam_cases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -102,17 +113,20 @@ async def save_message(user_id: int, sender: str, text: Optional[str]):
 
 
 
-async def save_screenshot(user_id: int, file_id: str, url: Optional[str]):
+async def save_media(user_id: int, file_id: str, media_type: str, url: Optional[str] = None):
     now = datetime.utcnow().isoformat()
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
-                INSERT INTO screenshots (user_id, file_id, url, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, file_id, url, now))
+                INSERT INTO media_logs (user_id, file_id, media_type, url, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, file_id, media_type, url, now))
             await db.commit()
     except Exception as e:
-        logger.error(f"Ошибка сохранения скриншота в БД: {e}")
+        logger.error(f"Ошибка сохранения медиафайла в БД: {e}")
+
+async def save_screenshot(user_id: int, file_id: str, url: Optional[str]):
+    await save_media(user_id=user_id, file_id=file_id, media_type="screenshot", url=url)
 
 async def record_scam_case(
     user_id: int,
