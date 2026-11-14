@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from ai_service import ai_service, ScamAnalysisResult
 from keyboards import get_main_keyboard, get_cancel_keyboard, get_actions_keyboard
-from database import register_or_update_user, save_message
+from database import register_or_update_user, save_message, save_screenshot
 
 router = Router()
 
@@ -101,10 +101,10 @@ async def cmd_start(message: Message, state: FSMContext):
         greeting_header +
         f"Я — <b>АнтиМошенник (AntiScammer)</b>, твой персональный AI-ассистент по цифровой безопасности.\n\n"
         f"💡 <b>Что я умею:</b>\n"
-        f"1. <b>Анализировать подозрительные сообщения</b> с помощью искусственного интеллекта на манипуляции, фишинг и шантаж.\n"
+        f"1. <b>Анализировать подозрительные сообщения и скриншоты переписок</b> с помощью искусственного интеллекта Gemini на манипуляции, фишинг, фейковые чеки и шантаж.\n"
         f"2. <b>Защищать от «дропперства» и серых переводов:</b> когда просят перевести деньги на сторонние номера/карты (например, при покупке игровой валюты, робуксов, скинов), что часто ведет к статьям об экстремизме или отмывании денег.\n"
         f"3. Давать четкие инструкции, как не потерять деньги и не стать соучастником преступления.\n\n"
-        f"👇 <i>Отправь мне любой текст сообщения прямо сейчас или выбери кнопку в меню!</i>"
+        f"👇 <i>Отправь мне текст или скриншот прямо сейчас либо выбери кнопку в меню!</i>"
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
     await save_message(user_id=user.id, sender="bot", text=welcome_text)
@@ -114,8 +114,9 @@ async def cmd_start(message: Message, state: FSMContext):
 async def start_check_prompt(message: Message, state: FSMContext):
     await state.set_state(CheckState.waiting_for_text)
     prompt_text = (
-        "📝 <b>Отправьте подозрительное сообщение или опишите ситуацию:</b>\n\n"
+        "📝 <b>Отправьте подозрительное сообщение, скриншот или опишите ситуацию:</b>\n\n"
         "<i>Например:\n"
+        "— Скриншот диалога с подозрительным собеседником или чек перевода\n"
         "— Текст переписки от продавца игровой валюты\n"
         "— Просьбу перевести деньги по номеру телефона третьему лицу\n"
         "— Ссылку на акцию или предложение лёгкого заработка</i>"
@@ -201,6 +202,57 @@ async def cb_what_if_scammed(call: CallbackQuery):
     await call.message.answer(text, parse_mode="HTML")
     await save_message(user_id=call.from_user.id, sender="bot", text=text)
     await call.answer()
+
+
+@router.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
+async def process_user_photo(message: Message, state: FSMContext):
+    await state.clear()
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    waiting_msg = await message.answer("🤖 <i>Анализирую изображение через нейросеть Gemini... Пожалуйста, подождите несколько секунд.</i>", parse_mode="HTML")
+
+    try:
+        if message.photo:
+            photo = message.photo[-1]
+            file_id = photo.file_id
+            mime_type = "image/jpeg"
+        else:
+            file_id = message.document.file_id
+            mime_type = message.document.mime_type or "image/jpeg"
+
+        file = await message.bot.get_file(file_id)
+        if file.file_path and file.file_path.lower().endswith(".png"):
+            mime_type = "image/png"
+        elif file.file_path and file.file_path.lower().endswith(".webp"):
+            mime_type = "image/webp"
+
+        file_url = f"https://api.telegram.org/file/bot{message.bot.token}/{file.file_path}"
+        await save_screenshot(user_id=message.from_user.id, file_id=file_id, url=file_url)
+
+        # Скачиваем байты изображения
+        buf = await message.bot.download(file)
+        if hasattr(buf, "getvalue"):
+            image_bytes = buf.getvalue()
+        elif hasattr(buf, "read"):
+            if hasattr(buf, "seek"):
+                buf.seek(0)
+            image_bytes = buf.read()
+        else:
+            image_bytes = buf
+
+        report = await ai_service.analyze_image(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            user_comment=message.caption
+        )
+        formatted_text = format_report(report)
+        await waiting_msg.edit_text(formatted_text, reply_markup=get_actions_keyboard(), parse_mode="HTML")
+        await save_message(user_id=message.from_user.id, sender="bot", text=formatted_text)
+    except Exception as e:
+        logger.exception("Ошибка при обработке изображения")
+        error_msg = f"❌ Не удалось завершить анализ: {html.escape(str(e))}\n\nПопробуйте ещё раз позже."
+        await waiting_msg.edit_text(error_msg, reply_markup=get_main_keyboard(), parse_mode="HTML")
+        await save_message(user_id=message.from_user.id, sender="bot", text=error_msg)
+
 
 @router.message(CheckState.waiting_for_text)
 @router.message(F.text)

@@ -16,8 +16,8 @@ class ChatLoggingMiddleware(BaseMiddleware):
     ) -> Any:
         if isinstance(event, Message):
             if event.from_user and not event.from_user.is_bot:
-                # Если это текст сообщения
-                text_to_save = event.text or event.caption
+                # Если это текст сообщения или медиа
+                text_to_save = event.text or (f"[Изображение]: {event.caption}" if event.caption else ("[Изображение]" if (event.photo or event.document) else None))
                 if text_to_save:
                     await save_message(user_id=event.from_user.id, sender="user", text=text_to_save)
         elif isinstance(event, CallbackQuery):

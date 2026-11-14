@@ -92,4 +92,53 @@ class AIService:
                 recommendations=["Не переводите деньги и не переходите по ссылкам до подтверждения безопасности."]
             )
 
+
+    async def analyze_image(self, image_bytes: bytes, mime_type: str = "image/jpeg", user_comment: Optional[str] = None) -> ScamAnalysisResult:
+        if not self.is_configured():
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Критический (демо-режим)",
+                scam_type="Анализ недоступен (не настроен GEMINI_API_KEY)",
+                summary="Бот работает в демонстрационном режиме, так как не указан GEMINI_API_KEY в .env.",
+                red_flags=["В конфигурации отсутствует действующий ключ Google Gemini API"],
+                legal_warning=None,
+                recommendations=["Получите бесплатный API ключ на https://aistudio.google.com/", "Укажите ключ в .env файле проекта и перезапустите бота"]
+            )
+        try:
+            prompt = (
+                "Проанализируй данный скриншот/изображение на признаки мошенничества, социальной инженерии, манипуляций, "
+                "фишинга или уголовных рисков (дропперство, обналичивание, перевод по сторонним реквизитам за вознаграждение, "
+                "покупка игровой валюты/криптовалюты, сомнительные ссылки, просьбы перевести деньги на 'безопасный счет'). "
+                "Внимательно прочитай весь текст на изображении (OCR), проверь отправителей, суммы и реквизиты."
+            )
+            if user_comment and user_comment.strip():
+                prompt += f"\n\nДополнительный комментарий пользователя к изображению:\n\"\"\"{user_comment.strip()}\"\"\""
+
+            response = self.client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    prompt
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=ScamAnalysisResult,
+                    temperature=0.2,
+                )
+            )
+            result = ScamAnalysisResult.model_validate_json(response.text)
+            return result
+        except Exception as e:
+            logger.exception("Ошибка при вызове Gemini API (image)")
+            return ScamAnalysisResult(
+                is_scam=True,
+                risk_level="Высокий (ошибка обработки)",
+                scam_type="Не удалось завершить автоматический анализ",
+                summary=f"Произошла ошибка при анализе ИИ: {str(e)[:150]}",
+                red_flags=["Не удалось связаться с сервером ИИ для проверки"],
+                legal_warning=None,
+                recommendations=["Не переводите деньги и не переходите по ссылкам до подтверждения безопасности."]
+            )
+
 ai_service = AIService()

@@ -33,6 +33,16 @@ async def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS screenshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                file_id TEXT,
+                url TEXT,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
         await db.execute("DROP VIEW IF EXISTS top_active_users")
         await db.execute("""
             CREATE VIEW top_active_users AS
@@ -63,6 +73,20 @@ async def save_message(user_id: int, sender: str, text: Optional[str]):
             await db.commit()
     except Exception as e:
         logger.error(f"Ошибка сохранения сообщения в БД: {e}")
+
+
+
+async def save_screenshot(user_id: int, file_id: str, url: Optional[str]):
+    now = datetime.utcnow().isoformat()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO screenshots (user_id, file_id, url, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (user_id, file_id, url, now))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения скриншота в БД: {e}")
 
 async def get_chat_history(user_id: int, limit: int = 50) -> list:
     """Получает последние сообщения пользователя и бота."""
